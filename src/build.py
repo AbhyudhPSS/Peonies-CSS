@@ -5,6 +5,11 @@ usage:  python3 build.py      (writes ../index.html and ../peonies.css)
 
 Petals are emitted already sorted back-to-front for each flower, so the browser never
 has to depth-sort a 3D context.
+
+Timing is emitted on a coarse grid (see GRID): every one-shot animation is widened so it
+starts and ends on a half-second, and holds still in the padding. The motion itself is
+unchanged; what changes is that the browser's main thread only has to wake a few times a
+second during the bloom, instead of on nearly every frame.
 """
 import math, random, re, os
 
@@ -106,6 +111,72 @@ def fmt(x, nd=3):
 KEYFRAMES = []          # @keyframes blocks, one per panel (literal numbers only)
 
 
+# ---------------------------------------------------------------- the grid
+# Starting or finishing an animation is the one thing the compositor cannot do alone: the
+# main thread has to wake, restyle every animation that is running, and commit the result,
+# which stalls the compositor for most of a frame. With ~740 one-shot animations each on
+# its own delay that was happening on almost every frame of the bloom.
+#
+# So every one-shot is widened to the nearest half-second on both sides, and holds its
+# first / last pose in the padding. All the starts and ends now land together on a few
+# shared instants, and in between the whole bouquet runs on the compositor untouched.
+GRID = .5
+
+
+def window(delay, dur):
+    """(start, total, a, b): the widened window, and where in it (0..1) the real motion
+    begins and ends."""
+    start = math.floor(delay / GRID + 1e-6) * GRID
+    end = math.ceil((delay + dur) / GRID - 1e-6) * GRID
+    total = end - start
+    return start, total, (delay - start) / total, (delay + dur - start) / total
+
+
+HELD = {}               # (base, a, b) -> keyframes name
+
+
+def held(base, frames, delay, dur):
+    """A one-shot animation, padded onto the grid by remapping its keyframes.
+    frames = [(percent, declarations), ...]; the timing function stays on the element
+    and so still shapes the real motion only (the padding sits between equal keyframes).
+    Returns (keyframes name, start, total)."""
+    start, total, a, b = window(delay, dur)
+    key = (base, fmt(a * 100, 3), fmt(b * 100, 3))
+    if key not in HELD:
+        name = "%s-%d" % (base, sum(1 for k in HELD if k[0] == base))
+        out = []
+        if a > 1e-6:
+            out.append("0%{" + frames[0][1] + "}")
+        for pct, decl in frames:
+            out.append(fmt((a + pct / 100 * (b - a)) * 100, 3) + "%{" + decl + "}")
+        if b < 1 - 1e-6:
+            out.append("100%{" + frames[-1][1] + "}")
+        HELD[key] = name
+        KEYFRAMES.append("@keyframes " + name + "{" + "".join(out) + "}")
+    return HELD[key], start, total
+
+
+def held_vars(base, frames, delay, dur):
+    """The same, as the three custom properties the stylesheet's one-shot rules read."""
+    name, start, total = held(base, frames, delay, dur)
+    return "--kn:%s;--ks:%ss;--kd:%ss" % (name, fmt(start, 2), fmt(total, 2))
+
+
+# The petals already have a keyframe block each, so they are padded the other way round:
+# the spring itself is squeezed into the middle of a wider linear() easing. Petals whose
+# delays sit at the same offset from the grid share one class.
+BLOOM_DUR = 3.8
+BLOOM_EASE = {}         # (a, b, total) -> class name
+
+
+def bloom_class(delay):
+    start, total, a, b = window(delay, BLOOM_DUR)
+    key = (fmt(a * 100, 3), fmt(b * 100, 3), fmt(total, 2))
+    if key not in BLOOM_EASE:
+        BLOOM_EASE[key] = "t%d" % len(BLOOM_EASE)
+    return BLOOM_EASE[key], start
+
+
 def petals_for(f):
     """Every panel (lower .p and upper .q of every petal), farthest first."""
     items = []
@@ -128,11 +199,13 @@ def panel_html(f, panel, ring, i, n, j, m):
     to = rc["t0"] + (rc["t1"] - rc["t0"]) * f["open"] + j * 4
     w = rc["pw"] * (1 + m * .09)
     ph = rc["ph"]
-    delay = f["db"] + rc["rd"] + i * .07
-    pose = f'rotateZ({fmt(f["roll"])}deg) rotateX({fmt(f["tilt"])}deg) rotateY({fmt(f["yaw"])}deg)'
-    pose0 = f'rotateZ({fmt(f["roll"])}deg) rotateX({fmt(f["tilt"])}deg) rotateY({fmt(f["yaw"] - 50)}deg)'
-    chain = f'translateY({fmt(-rc["y"])}em) rotateY({fmt(a)}deg) translateZ({fmt(-rc["r"])}em) rotateX({fmt(to)}deg)'
-    chain0 = f'translateY({fmt(-rc["y0"])}em) rotateY({fmt(a - 45)}deg) translateZ({fmt(-rc["r0"])}em) rotateX({fmt(rc["t0"])}deg)'
+    ease, begin = bloom_class(f["db"] + rc["rd"] + i * .07)
+    # The bloom's spin (yaw) and the petal's own place round the ring (a) are both turns
+    # about the same axis, with only a slide along that axis between them, so they are
+    # written as one rotateY: the same motion, one less function to blend per frame.
+    pose = pose0 = f'rotateZ({fmt(f["roll"])}deg) rotateX({fmt(f["tilt"])}deg)'
+    chain = f'translateY({fmt(-rc["y"])}em) rotateY({fmt(f["yaw"] + a)}deg) translateZ({fmt(-rc["r"])}em) rotateX({fmt(to)}deg)'
+    chain0 = f'translateY({fmt(-rc["y0"])}em) rotateY({fmt(f["yaw"] - 50 + a - 45)}deg) translateZ({fmt(-rc["r0"])}em) rotateX({fmt(rc["t0"])}deg)'
     name = f"k{len(KEYFRAMES)}"
     if panel == "p":
         geom = f"left:{fmt(-w / 2)}em;width:{fmt(w)}em;height:{fmt(ph * .5)}em"
@@ -143,10 +216,14 @@ def panel_html(f, panel, ring, i, n, j, m):
         geom = f"left:{fmt(-w * .55)}em;width:{fmt(w * 1.1)}em;height:{fmt(ph * .6)}em"
         final = f"{pose} {chain} translateY({fmt(hinge)}em) scale(1,1) rotateX({fmt(rc['curl'])}deg)"
         start = f"{pose0} {chain0} translateY({fmt(hinge)}em) scale(.62,1) rotateX({fmt(rc['curl0'])}deg)"
-    KEYFRAMES.append(f"@keyframes {name}{{from{{transform:{start}}}}}")
-    style = (f"--i:{i};--n:{n};--j:{fmt(j, 2)};--m:{fmt(m, 2)};{geom};transform:{final};"
-             f"animation-name:{name};animation-delay:{fmt(delay, 2)}s")
-    return f'          <i class="{panel} r{ring}" style="{style}"><i class="s"></i></i>'
+    # The panel rests in its bud pose and the keyframe carries it to the open one, which
+    # the animation then keeps (fill: forwards). The other way round (resting open, held
+    # shut by the animation until its turn) looks the same but costs: an animation that
+    # is holding a pose is ticked on every frame, and all 632 would be from the first.
+    KEYFRAMES.append(f"@keyframes {name}{{to{{transform:{final}}}}}")
+    style = (f"--i:{i};--n:{n};--j:{fmt(j, 2)};--m:{fmt(m, 2)};{geom};transform:{start};"
+             f"animation-name:{name};animation-delay:{fmt(begin, 2)}s")
+    return f'          <i class="{panel} r{ring} {ease}" style="{style}"><i class="s"></i></i>'
 
 
 def origin(f):
@@ -161,22 +238,33 @@ def flower(fid, f):
     nod_period = round(random.uniform(7.4, 9.9), 1)        # each head keeps its own time
     nod = (f'{wind_kf(NOD, 1.7, scale_amp=.022)} {nod_period}s '
            f'{fmt(wind_phase(f["x"]) * .6, 2)}s linear infinite')
+    db = f["db"]
+    # the bud rides out on its stem (same window as the stem, see arm()); not from 0: a
+    # tiny bud is rasterised at load, a zero-size one only when it appears
+    fly, fly_s, fly_t = held("fly", [(0, "scale:.01"), (100, "scale:1")], f["d0"], STEM_DUR)
+    # a faint shadow grows in with the bloom, and a flare goes off as it reaches full open
+    shadow = held_vars("shadow-in", [(0, "opacity:0;scale:.4"), (100, "opacity:1;scale:1")], db - .2, 4.6)
+    halo = held_vars("halo", [(0, "opacity:0;scale:.45"), (30, "opacity:1"), (100, "opacity:0;scale:1.3")], db + 2.6, 2.8)
+    grow = held_vars("peony-grow", [(0, "scale:.62"), (100, "scale:1")], db - .4, 4.6)
     style = (
         f'--fx:{f["x"]};--fy:{f["y"]};--bx:{ox};--by:{oy};--R:{f["R"]};--open:{f["open"]};'
         f'--tilt:{f["tilt"]}deg;--roll:{f["roll"]}deg;--yaw:{f["yaw"]}deg;'
-        f'--d0:{f["d0"]}s;--db:{f["db"]}s;--sy:{f["sy"]};--kb:{f["kb"]};'
+        f'--sy:{f["sy"]};--kb:{f["kb"]};{shadow};--wind:{f["_wind"].split()[0]};'
         f'transform-origin:{fmt(ox - f["x"])}em {fmt(oy - f["y"])}em;'
-        f'animation:fly 2.1s {f["d0"]}s cubic-bezier(.22,.75,.25,1) backwards,{f["_wind"]}'
+        f'animation:{fly} {fmt(fly_t, 2)}s {fmt(fly_s, 2)}s cubic-bezier(.22,.75,.25,1) backwards,{f["_wind"]}'
     )
     return f'''    <div class="flower {fid}" style="{style}">
-      <i class="halo"></i>
+      <i class="halo" style="{halo}"></i>
       <div class="orient" style="animation:{nod}">
-        <div class="peony">
+        <div class="peony" style="{grow}">
           <i class="core"></i>
 {petals}
         </div>
       </div>
     </div>'''
+
+
+STEM_DUR = 2.1            # how long a stem takes to grow (and its bud to ride out)
 
 
 def stem_amp(ln):
@@ -193,9 +281,10 @@ def arm(f):
     ang = math.degrees(math.atan2(dx, -dy))
     f["_armlen"] = ln
     f["_wind"] = wind_anim(GUST, stem_amp(ln), f["x"])      # shared with the flower
+    grow = held_vars("stem-grow", [(0, "scale:1 0"), (100, "scale:1 1")], f["d0"], STEM_DUR)
     return (f'    <div class="arm" style="--bx:{ox};--by:{oy};--ang:{ang:.1f}deg;--len:{ln:.2f}em;'
-            f'--d0:{f["d0"]}s;animation:{f["_wind"]}">'
-            f'<i class="stem"></i></div>')
+            f'animation:{f["_wind"]}">'
+            f'<i class="stem" style="{grow}"></i></div>')
 
 
 def stemmed(keys):
@@ -300,8 +389,9 @@ def leaf(l):
     ls = round(random.uniform(4.6, 7.4), 1)                 # its own flutter period
     wag = (f'{wind_kf(GUST, 3.6 + l["L"] * .35)} {fmt(ls * 1.45, 2)}s '
            f'{fmt(wind_phase(l["x"]), 2)}s linear infinite')
+    unfurl = held_vars("unfurl", [(0, "scale:0;rotate:-30deg"), (100, "scale:1;rotate:0deg")], l["d"], 2.4)
     return (f'    <i class="leaf" style="--x:{l["x"]};--y:{l["y"]};--lw:{l["W"]*1.15:.2f}em;--lh:{l["L"]*1.12:.2f}em;'
-            f'--dir:{l["dir"]}deg;--f:{f};--d:{l["d"]}s;--tone:{l["tone"]}">'
+            f'--dir:{l["dir"]}deg;--f:{f};--tone:{l["tone"]};{unfurl}">'
             f'<i style="animation:{wag}"></i></i>')
 
 
@@ -319,8 +409,9 @@ def stalks():
         ang = -5 + t * 15 + random.uniform(-2.5, 2.5)
         ln = 4.3 + random.uniform(-.4, .9) + (1 - abs(t - .55)) * .5
         hue = random.choice(["#7d8d3e", "#6b8441", "#76876a", "#5f7d55", "#8a9748", "#677f74", "#72863f"])
+        grow = held_vars("stalk-grow", [(0, "scale:1 0"), (100, "scale:1 1")], round(.2 + i * .07, 2), 1.5)
         out.append(
-            f'      <i class="stalk" style="--x:{x:.2f};--ang:{ang:.1f}deg;--len:{ln:.2f}em;--c:{hue};--d:{.2 + i * .07:.2f}s"></i>'
+            f'      <i class="stalk" style="--x:{x:.2f};--ang:{ang:.1f}deg;--len:{ln:.2f}em;--c:{hue};{grow}"></i>'
         )
     return "\n".join(out)
 
@@ -370,7 +461,8 @@ def splats():
         s = round(random.choice([.12, .18, .26, .34, .5, .7]) * random.uniform(.8, 1.2), 2)
         c = random.choice(cols)
         d = round(.9 + random.uniform(0, 5.2), 2)
-        out.append(f'      <i style="--x:{x:.2f};--y:{y:.2f};--s:{s}em;--c:{c};--d:{d}s"></i>')
+        pop = held_vars("splat", [(0, "scale:0;opacity:0"), (100, "scale:1;opacity:.65")], d, .9)
+        out.append(f'      <i style="--x:{x:.2f};--y:{y:.2f};--s:{s}em;--c:{c};{pop}"></i>')
     return "\n".join(out)
 
 
@@ -403,6 +495,10 @@ def title_wave_kf():
     return name
 
 
+LETTER_IN = [(0, "opacity:0;transform:translateY(.55em) rotate(-8deg) scale(.6)"),
+             (100, "opacity:1;transform:translateY(0) rotate(0deg) scale(1)")]
+
+
 def title_html():
     wave = title_wave_kf()
     glyphs = [ch for ch in TITLE if ch != " "]
@@ -412,9 +508,10 @@ def title_html():
             letters.append('<span class="gap"></span>')
             continue
         cls = ' class="cap"' if ch in "PY" else ""
+        rise, rise_s, rise_t = held("letter-in", LETTER_IN, float("%.2f" % (.5 + idx * .075)), 1.5)
         letters.append(
             f'<span{cls} style="color:{title_color(idx / (len(glyphs) - 1))};'
-            f'animation:letter-in 1.5s {.5 + idx * .075:.2f}s cubic-bezier(.2,.9,.25,1.15) backwards,'
+            f'animation:{rise} {fmt(rise_t, 2)}s {fmt(rise_s, 2)}s cubic-bezier(.2,.9,.25,1.15) backwards,'
             f'{wave} 6.5s {fmt(-idx * .105, 3)}s linear infinite">{ch}</span>'
         )
         idx += 1
@@ -422,12 +519,14 @@ def title_html():
     spark_html = "".join(
         f'<i class="spark" style="--x:{x}%;--y:{y}%;animation-delay:{d}s"></i>' for x, y, d in sparks
     )
+    draw = held_vars("rule-draw", [(0, "scale:0 1"), (100, "scale:1 1")], 1.6, 1.6)
+    pop = held_vars("petal-pop", [(0, "scale:0;rotate:-90deg"), (100, "scale:1;rotate:45deg")], 1.5, 1.4)
     return f'''    <header class="title">
       <h1 aria-label="{TITLE}">
         {"".join(letters)}
         {spark_html}
       </h1>
-      <div class="rule" aria-hidden="true"><i></i><b></b><i></i></div>
+      <div class="rule" aria-hidden="true"><i style="{draw}"></i><b style="{pop}"></b><i style="{draw}"></i></div>
     </header>'''
 
 
@@ -435,6 +534,35 @@ def title_html():
 # The drift is what gives the low, outer flowers a real left-right travel.
 BOUQUET_WIND = "%s %ss 0s linear infinite" % (
     wind_kf(GUST, 1.45, sway_em=.42), fmt(WIND_PERIOD, 2))
+
+WASHES = "".join(
+    '<i style="%s"></i>' % held_vars("wash-in", [(0, "opacity:0;scale:.35"), (100, "opacity:1;scale:1")], d, 7)
+    for d in (.3, 1.1, 1.6, 2.1))
+WRAP_IN = held_vars("wrap-in", [(0, "scale:1.22 1"), (100, "scale:1 1")], 1.45, 1.7)
+WRAP_UP = held_vars("wrap-up", [(0, "translate:0 100%"), (100, "translate:0 0")], 1.45, 1.7)
+CREDIT_IN = held_vars("credit-in", [(0, "opacity:0;transform:translateY(.8em)"), (100, "opacity:1;transform:translateY(0)")], 3.2, 2)
+
+# ---------------------------------------------------------------- the loop clock
+# The last .56s of each cycle is a pulse that resets the one-shot animations (see THE
+# LOOP in the stylesheet). For the first CLOCK_PULSES cycles each pulse is its own
+# one-shot animation with a delay, which costs nothing to wait for, unlike a repeating
+# clock, which is ticked on the main thread on every frame. A waiting pulse is not quite
+# free either, though: the browser looks at each one again whenever the main thread does
+# wake (about 60 microseconds apiece here), so a list covering hours turned every such
+# frame into a 50ms one. Hence a list of modest length, and a repeating clock after it.
+LOOP = 28.0               # seconds per cycle
+LOOP_PULSE = .56          # ...of which the last this-many are the reset
+CLOCK_PULSES = 64         # half an hour
+
+
+def clock():
+    pulses = ["lp %ss %ss" % (fmt(LOOP_PULSE, 2), fmt(LOOP * k - LOOP_PULSE, 2))
+              for k in range(1, CLOCK_PULSES + 1)]
+    # ...then the flag that hands over to the repeating clock, a moment after the last
+    # pulse, so that the two keep the same beat
+    flag = "run-down .01s %ss forwards" % fmt(LOOP * CLOCK_PULSES + .1, 2)
+    return ",\n    ".join([", ".join(pulses[i:i + 8]) for i in range(0, len(pulses), 8)] + [flag])
+
 
 # ---------------------------------------------------------------- assemble HTML
 html = f'''<!DOCTYPE html>
@@ -450,11 +578,14 @@ html = f'''<!DOCTYPE html>
   <!-- Pure HTML + CSS: no JavaScript, no images, no SVG. Everything you see is gradients, transforms and keyframes. -->
   <div class="paper"></div>
 
+  <!-- (this wrapper holds the loop's spare clock: see THE LOOP in the stylesheet) -->
+  <div class="loop">
+
   <main class="scene">
 {title_html()}
     <div class="stage" role="img" aria-label="A bouquet of pink peonies blossoming against watercolour paper" style="--bx:{BX};--by:{BY}">
 
-      <div class="wash"><i></i><i></i><i></i><i></i></div>
+      <div class="wash">{WASHES}</div>
       <div class="splats">
 {splats()}
       </div>
@@ -466,7 +597,7 @@ html = f'''<!DOCTYPE html>
       <div class="bunch">
 {stalks()}
       </div>
-      <div class="ribbon"><div class="ribbon__band"></div></div>
+      <div class="ribbon" style="{WRAP_IN}"><div class="ribbon__band" style="{WRAP_UP}"></div></div>
 
       <div class="leaves leaves--1">
 {leaves(1)}
@@ -502,16 +633,18 @@ html = f'''<!DOCTYPE html>
     </div>
   </main>
 
-  <div class="veil"></div>
+  <div class="curtain"><div class="veil"></div></div>
 
-  <p class="credit">Made with <i class="heart" aria-hidden="true"></i> by <b>{CREDIT_NAME}</b></p>
+  </div>
+
+  <p class="credit" style="{CREDIT_IN}">Made with <i class="heart" aria-hidden="true"></i> by <b>{CREDIT_NAME}</b></p>
 </body>
 </html>
 '''
 
 
 # ---------------------------------------------------------------- generated CSS pieces
-def spring(zeta, n, settle=0.004):
+def spring_points(zeta, n, settle=0.004):
     w0 = -math.log(settle) / zeta
     wd = w0 * math.sqrt(1 - zeta ** 2)
     pts = []
@@ -519,7 +652,24 @@ def spring(zeta, n, settle=0.004):
         t = k / (n - 1)
         pts.append(1 - math.exp(-zeta * w0 * t) * (math.cos(wd * t) + (zeta * w0 / wd) * math.sin(wd * t)))
     pts[0], pts[-1] = 0, 1
-    return "linear(" + ", ".join(("%.3f" % p).rstrip("0").rstrip(".") or "0" for p in pts) + ")"
+    return [fmt(p) for p in pts]
+
+
+def spring(zeta, n):
+    return "linear(" + ", ".join(spring_points(zeta, n)) + ")"
+
+
+def bloom_classes():
+    """The petal spring, held still before and after so the animation spans whole grid
+    steps. Stops with no position are spread evenly between their neighbours, so the
+    spring keeps exactly the shape it has on its own."""
+    pts = spring_points(.62, 120)
+    rules = []
+    for (a, b, total), cls in BLOOM_EASE.items():
+        stops = ["0"] + (["0 %s%%" % a] if a != "0" else []) + pts[1:-1]
+        stops += ["1 %s%%" % b, "1"] if b != "100" else ["1"]
+        rules.append(".%s{animation-duration:%ss;animation-timing-function:linear(%s)}" % (cls, total, ", ".join(stops)))
+    return "\n".join(rules)
 
 
 def leaf_polygon():
@@ -549,9 +699,17 @@ def grain(seed, n, unit_x, unit_y, xmax, ymax):
 
 css = SRC
 css = css.replace("/*@SOFT@*/", spring(.78, 100))
-css = css.replace("/*@BLOOM@*/", spring(.62, 120))
 css = css.replace("/*@LEAF_POLY@*/", leaf_polygon())
 css = css.replace("/*@PETAL_KEYFRAMES@*/", "\n".join(KEYFRAMES))
+css = css.replace("/*@BLOOM_CLASSES@*/", bloom_classes())
+css = css.replace("/*@CLOCK@*/", "\n    " + clock())
+# the reset rule is written once, for the pulses on <body>, and repeated for the
+# repeating clock that takes over from them
+begin, end = "/*@CLOCK_RESET_BEGIN@*/\n", "/*@CLOCK_RESET_END@*/\n"
+head, rest = css.split(begin)
+rule, tail = rest.split(end)
+assert rule.count("@container clock ") == 1
+css = head + rule + rule.replace("@container clock ", "@container spare-clock ") + tail
 css = css.replace("/*@GRAIN_PAPER@*/", "\n    " + grain(5, 1000, "vw", "vh", 100, 100))
 css = css.replace("/*@GRAIN_STAGE@*/", "\n    " + grain(9, 330, "em", "em", 20, 26.7))
 assert "/*@" not in css
@@ -560,4 +718,5 @@ os.makedirs(OUT_DIR, exist_ok=True)
 open(OUT_HTML, "w").write(html)
 open(OUT_CSS, "w").write(css)
 print("wrote", OUT_HTML, len(html), "bytes;", OUT_CSS, len(css), "bytes;",
-      "petals:", html.count('class="p r'), "elements:", html.count("<"))
+      "petals:", html.count('class="p r'), "elements:", html.count("<"),
+      "keyframes:", len(KEYFRAMES), "bloom easings:", len(BLOOM_EASE))

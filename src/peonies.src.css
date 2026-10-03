@@ -21,6 +21,15 @@
      every frame is what makes 3D CSS flowers stutter.
    - Everything that moves is a transform or an opacity (compositor-only).
      No filters, no blend modes, no full-screen opacity layers.
+   - The main thread is left asleep. The one-shot animations start and end
+     together on a half-second grid (build.py, GRID), so it wakes a few times a
+     second during the bloom instead of on every frame, and the clock that
+     restarts the loop does not tick on it either (see THE LOOP).
+   - Nothing that moves carries a clip-path: an outline on an animated element
+     costs an offscreen pass on every frame, so outlines live on a still child.
+   - A petal is painted once. Each cycle restarts the animations in place rather
+     than rebuilding the scene, and nothing above a bloom is allowed to change in
+     a way that makes the browser paint its ~80 layers again (see .peony).
    - The paper grain is a point cloud of box-shadows, not hundreds of gradients.
    ========================================================================== */
 
@@ -81,37 +90,95 @@ body { background: var(--paper); overflow: hidden; }
 }
 
 /* the veil: dissolves the scene into paper at the end of every cycle without
-   needing a full-screen opacity layer on the scene itself */
-.veil {
-  opacity: 0;
-  z-index: 5;
-  animation: veil 28s linear infinite;   /* infinite: the loop clock repeats, so the dissolve must too */
-}
+   needing a full-screen opacity layer on the scene itself. It belongs to the loop
+   (see below): it is opaque while the animations are reset, lifts as the new cycle
+   begins and comes down again at its end. Where the loop cannot run it never shows. */
+.veil { opacity: 0; }
 @keyframes veil {
-  0%, 87.5% { opacity: 0; }
-  94%, 98%  { opacity: 1; }
-  100%      { opacity: 0; }
+  0%          { opacity: 1; }
+  2%, 89.5%   { opacity: 0; }
+  96%, 100%   { opacity: 1; }
 }
+
+/* On the first run there is nothing to dissolve from, so the veil's opening fade is
+   kept out of sight. The curtain is not part of the loop: it does this once, at load. */
+.curtain {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  animation: curtain .56s linear;
+}
+@keyframes curtain { from, to { opacity: 0; } }
 
 /* ---------- scene + stage --------------------------------------------------- */
 /* THE LOOP, WITHOUT SCRIPT.
-   <body> runs a clock that flips a registered custom property for a moment each
-   cycle. A style query reacts to that flip by taking the scene out of the display
-   tree, and putting it back restarts every animation inside it from zero. Browsers
-   without style queries simply play the sequence once and keep the ambient motion. */
+   A registered custom property is flipped for a moment at the end of each cycle,
+   while the veil has the scene covered. A style query reacts to the flip by switching
+   the one-shot animations off; when the flip ends they come back, and so start again
+   from zero. Nothing leaves the page, so nothing is laid out or painted a second time.
+   Browsers without style queries simply play the sequence once and keep the ambient
+   motion.
+
+   The flip, for the first half hour, is not a repeating animation. A custom property
+   cannot be animated off the main thread, so a repeating clock is ticked there on every
+   frame, dragging a restyle of everything that moves along with it. A one-shot pulse
+   with a delay, on the other hand, is only a timer until its moment comes. So <body>
+   carries one pulse per cycle (build.py writes the list), and between them the main
+   thread sleeps. A waiting pulse is not quite free (the browser looks at each one again
+   every time the main thread does wake), so the list is kept to that half hour; when it
+   runs out it leaves a flag behind, and the flag starts an ordinary repeating clock on
+   the wrapper inside. That costs some processor time, not smoothness, and it means the
+   loop cannot stall: not after hours, and not if a pulse goes by unseen in a hidden tab. */
 @property --loop {
   syntax: "<integer>";
   inherits: false;
   initial-value: 0;
 }
-
-body { animation: loop-clock 28s step-end infinite; }
-
-@keyframes loop-clock {
-  0%  { --loop: 0; }
-  96% { --loop: 1; }      /* scene removed (the veil already hides it) */
-  98% { --loop: 0; }      /* scene returns, every animation restarts */
+@property --run-down {
+  syntax: "<integer>";
+  inherits: false;
+  initial-value: 0;
 }
+@keyframes lp       { from, to { --loop: 1; } }        /* "loop pulse" */
+@keyframes run-down { from, to { --run-down: 1; } }    /* kept afterwards (forwards) */
+
+html { --looping: 1; }      /* read back through a style query: only where those work */
+body {
+  container-name: clock;
+  animation: /*@CLOCK@*/;
+}
+
+.loop { container-name: spare-clock; }
+@container clock style(--run-down: 1) {
+  .loop { animation: loop-clock 28s step-end infinite; }
+}
+@keyframes loop-clock {
+  0%   { --loop: 0; }
+  98%  { --loop: 1; }     /* animations off (the veil already hides the scene) */
+  100% { --loop: 0; }     /* animations back: every one-shot restarts */
+}
+
+@container style(--looping: 1) {
+  .veil { opacity: 1; animation: veil 28s linear infinite; }
+}
+
+/* What a pulse resets: the one-shots, the air and the veil. What it leaves alone:
+   - the petal skins, which never animate and so need no restyle;
+   - the breeze. The bunch, the stems, the flower heads and the leaf blades go on
+     swaying straight through. Stopping them would lay every bloom flat for a moment,
+     and a flower whose transform becomes "none" has all its petals repainted. A flower
+     therefore drops only the first animation in its list (the bud riding out) and
+     keeps its --wind. */
+/*@CLOCK_RESET_BEGIN@*/
+@container clock style(--loop: 1) {
+  .veil,
+  .scene :not(.s, .bouquet, .arm, .flower, .orient, .leaf > i),
+  .scene :not(.s, .leaf > i)::before,
+  .scene :not(.s)::after { animation: none !important; }
+  .flower { animation-name: none, var(--wind) !important; }
+}
+/*@CLOCK_RESET_END@*/
 
 .scene {
   /* one unit for everything: the bouquet, the heading and their spacing all scale with it */
@@ -124,10 +191,11 @@ body { animation: loop-clock 28s step-end infinite; }
   row-gap: calc(var(--u) * .5);
 }
 
-/* (declared after .scene on purpose: same specificity, later wins) */
-@container style(--loop: 1) {
-  .scene { display: none; }
-}
+/* ONE-SHOT ANIMATIONS.
+   Anything that plays once reads its keyframes, start and length from three custom
+   properties that build.py sets on the element (--kn, --ks, --kd). The keyframes come
+   padded out to whole steps of the timing grid, holding the first and last pose in the
+   padding, so the easing named in each rule below still shapes the real motion only. */
 
 .stage {
   position: relative;
@@ -176,13 +244,10 @@ body { animation: loop-clock 28s step-end infinite; }
   text-shadow:
     0 .035em 0 rgba(255, 255, 255, .65),
     0 .09em .55em rgba(238, 148, 184, .5);
-  animation: letter-in 1.5s cubic-bezier(.2, .9, .25, 1.15) backwards;
+  /* the entrance (letter-in, 1.5s) is written inline by build.py, one letter at a time */
 }
 .title h1 > .cap { font-size: 1.14em; }
 .title h1 > .gap { width: .3em; }
-@keyframes letter-in {
-  from { opacity: 0; transform: translateY(.55em) rotate(-8deg) scale(.6); }
-}
 
 /* a little rule that draws itself outward from a petal-shaped diamond */
 .rule {
@@ -195,14 +260,13 @@ body { animation: loop-clock 28s step-end infinite; }
   flex: 1;
   height: 1px;
   background: linear-gradient(90deg, transparent, rgba(190, 82, 124, .75));
-  animation: rule-draw 1.6s 1.6s cubic-bezier(.3, .7, .25, 1) backwards;
+  animation: var(--kn) var(--kd) var(--ks) cubic-bezier(.3, .7, .25, 1) backwards;   /* rule-draw */
 }
 .rule i:last-child {
   background: linear-gradient(270deg, transparent, rgba(190, 82, 124, .75));
 }
 .rule i:first-child { transform-origin: 100% 50%; }
 .rule i:last-child  { transform-origin: 0 50%; }
-@keyframes rule-draw { from { scale: 0 1; } }
 
 .rule b {
   width: calc(var(--u) * .62);
@@ -211,21 +275,26 @@ body { animation: loop-clock 28s step-end infinite; }
   border-radius: 80% 0 80% 0;                 /* a petal */
   rotate: 45deg;
   box-shadow: 0 0 calc(var(--u) * .5) rgba(238, 130, 172, .55);
-  animation: petal-pop 1.4s 1.5s var(--soft) backwards;
+  animation: var(--kn) var(--kd) var(--ks) var(--soft) backwards;                    /* petal-pop */
 }
-@keyframes petal-pop { from { scale: 0; rotate: -90deg; } }
 
-/* four little stars that twinkle around the words */
+/* four little stars that twinkle around the words. The star is cut out of a still
+   pseudo-element: the box that twinkles has no outline of its own to mask each frame. */
 .title .spark {
   position: absolute;
   width: .34em;
   height: .34em;
   left: var(--x);
   top: var(--y);
-  background: radial-gradient(circle, #fff 20%, #f9cbdc 60%, #f3a6c1);
-  clip-path: polygon(50% 0, 60% 40%, 100% 50%, 60% 60%, 50% 100%, 40% 60%, 0 50%, 40% 40%);
   opacity: 0;
   animation: twinkle 3.6s ease-in-out infinite backwards;
+}
+.title .spark::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle, #fff 20%, #f9cbdc 60%, #f3a6c1);
+  clip-path: polygon(50% 0, 60% 40%, 100% 50%, 60% 60%, 50% 100%, 40% 60%, 0 50%, 40% 40%);
 }
 @keyframes twinkle {
   0%, 100% { opacity: 0; transform: scale(.2) rotate(0deg); }
@@ -249,7 +318,7 @@ body { animation: loop-clock 28s step-end infinite; }
   letter-spacing: .14em;
   color: rgba(104, 48, 78, .78);
   text-shadow: 0 1px 0 rgba(255, 255, 255, .6);
-  animation: credit-in 2s 3.2s ease-out backwards;
+  animation: var(--kn) var(--kd) var(--ks) ease-out backwards;       /* credit-in */
 }
 .credit b {
   font-style: normal;
@@ -259,7 +328,6 @@ body { animation: loop-clock 28s step-end infinite; }
   text-transform: uppercase;
   color: #8a2b59;
 }
-@keyframes credit-in { from { opacity: 0; transform: translateY(.8em); } }
 
 /* a heart drawn from a square and two circles, with a slow heartbeat */
 .credit .heart {
@@ -325,14 +393,12 @@ body { animation: loop-clock 28s step-end infinite; }
 .wash i {
   position: absolute;
   border-radius: 50%;
-  animation: wash-in 7s ease-out backwards;
+  animation: var(--kn) var(--kd) var(--ks) ease-out backwards;       /* wash-in */
 }
-.wash i:nth-child(1) { left: 1em;   top: 0;     width: 17em; height: 12em; background: radial-gradient(closest-side, rgba(246, 176, 200, .55), transparent); animation-delay: .3s; }
-.wash i:nth-child(2) { left: 3em;   top: 8em;   width: 16em; height: 12em; background: radial-gradient(closest-side, rgba(244, 170, 196, .45), transparent); animation-delay: 1.1s; }
-.wash i:nth-child(3) { left: -1em;  top: 11em;  width: 9em;  height: 9em;  background: radial-gradient(closest-side, rgba(176, 204, 168, .5),  transparent); animation-delay: 1.6s; }
-.wash i:nth-child(4) { left: 12em;  top: 14em;  width: 9em;  height: 9em;  background: radial-gradient(closest-side, rgba(170, 196, 212, .45), transparent); animation-delay: 2.1s; }
-
-@keyframes wash-in { from { opacity: 0; scale: .35; } }
+.wash i:nth-child(1) { left: 1em;   top: 0;     width: 17em; height: 12em; background: radial-gradient(closest-side, rgba(246, 176, 200, .55), transparent); }
+.wash i:nth-child(2) { left: 3em;   top: 8em;   width: 16em; height: 12em; background: radial-gradient(closest-side, rgba(244, 170, 196, .45), transparent); }
+.wash i:nth-child(3) { left: -1em;  top: 11em;  width: 9em;  height: 9em;  background: radial-gradient(closest-side, rgba(176, 204, 168, .5),  transparent); }
+.wash i:nth-child(4) { left: 12em;  top: 14em;  width: 9em;  height: 9em;  background: radial-gradient(closest-side, rgba(170, 196, 212, .45), transparent); }
 
 .splats i {
   position: absolute;
@@ -343,9 +409,8 @@ body { animation: loop-clock 28s step-end infinite; }
   border-radius: 52% 48% 46% 54%;
   background: var(--c);
   opacity: .65;
-  animation: splat .9s var(--d) var(--soft) backwards;
+  animation: var(--kn) var(--kd) var(--ks) var(--soft) backwards;    /* splat */
 }
-@keyframes splat { from { scale: 0; opacity: 0; } }
 
 /* ---------- stems ------------------------------------------------------------ */
 /* Each flower has an arm that starts in the bundle and ends at the flower's base.
@@ -370,9 +435,8 @@ body { animation: loop-clock 28s step-end infinite; }
   background:
     linear-gradient(90deg, rgba(20, 48, 22, .55), transparent 28%, rgba(214, 238, 160, .30) 52%, transparent 74%, rgba(20, 48, 22, .45)),
     linear-gradient(180deg, #5f8a40, #4d7a37);
-  animation: stem-grow 2.1s var(--d0) var(--fly) backwards;
+  animation: var(--kn) var(--kd) var(--ks) var(--fly) backwards;     /* stem-grow */
 }
-@keyframes stem-grow { from { scale: 1 0; } }
 
 /* the cut ends below the ribbon */
 .stalk {
@@ -395,9 +459,8 @@ body { animation: loop-clock 28s step-end infinite; }
     color-mix(in oklab, var(--c), #fff 20%) 62%,
     color-mix(in oklab, var(--c), #000 20%));
   clip-path: polygon(0 0, 100% 0, 100% 100%, 0 calc(100% - .32em));
-  animation: stalk-grow 1.5s var(--d) var(--soft) backwards;
+  animation: var(--kn) var(--kd) var(--ks) var(--soft) backwards;    /* stalk-grow */
 }
-@keyframes stalk-grow { from { scale: 1 0; } }
 
 /* ---------- ribbon ----------------------------------------------------------- */
 /* The wrapper is a window; the band slides up through it (transform only). */
@@ -408,9 +471,8 @@ body { animation: loop-clock 28s step-end infinite; }
   width: 2.95em;
   height: 5.7em;
   overflow: hidden;
-  animation: wrap-in 1.7s 1.45s cubic-bezier(.3, .7, .25, 1) backwards;
+  animation: var(--kn) var(--kd) var(--ks) cubic-bezier(.3, .7, .25, 1) backwards;   /* wrap-in */
 }
-@keyframes wrap-in { from { scale: 1.22 1; } }
 
 .ribbon__band {
   position: absolute;
@@ -432,13 +494,14 @@ body { animation: loop-clock 28s step-end infinite; }
     radial-gradient(70% 26% at 72% 72%, rgba(58, 86, 98, .26), transparent),
     linear-gradient(180deg, rgba(40, 62, 74, .22), rgba(40, 62, 74, 0) 22%, rgba(40, 62, 74, 0) 74%, rgba(40, 62, 74, .26)),
     linear-gradient(90deg, #7f97a3 0%, #a9bdc5 30%, #a1b6bd 58%, #70878f 100%);
-  animation: wrap-up 1.7s 1.45s cubic-bezier(.3, .7, .25, 1) backwards;
+  animation: var(--kn) var(--kd) var(--ks) cubic-bezier(.3, .7, .25, 1) backwards;   /* wrap-up */
 }
-@keyframes wrap-up { from { translate: 0 100%; } }
 
 /* ---------- leaves ----------------------------------------------------------- */
 /* a leaf is an upright box whose base sits on (x, y), aimed with --dir. The wrapper
-   unfurls; the blade inside carries the outline (clip-path) and flutters afterwards.
+   unfurls and the blade inside it flutters; the leaf itself (outline, veins, light) is
+   painted on the blade's ::before, which never moves on its own. An outline on the
+   fluttering box would be re-masked on every frame; on a still child it is cut once.
    Left half dark, right half catching the light. */
 .leaf {
   position: absolute;
@@ -448,18 +511,23 @@ body { animation: loop-clock 28s step-end infinite; }
   height: var(--lh);
   transform-origin: 50% 100%;
   transform: rotate(var(--dir));
-  animation: unfurl 2.4s var(--d) var(--soft) backwards;
+  animation: var(--kn) var(--kd) var(--ks) var(--soft) backwards;    /* unfurl */
 }
-@keyframes unfurl { from { scale: 0; rotate: -30deg; } }
 
 .leaf > i {
-  --c0: color-mix(in oklab, #0d1c0b, #2a4f2c calc(var(--tone) * 100%));
-  --c1: color-mix(in oklab, #1a361b, #46733a calc(var(--tone) * 100%));
-  --c2: color-mix(in oklab, #2f5429, #7ea15a calc(var(--tone) * 100%));
   position: absolute;
   inset: 0;
   transform-origin: 50% 100%;
   transform: scaleX(var(--f));
+  /* the blade's wag comes from build.py, phase-shifted with the rest of the breeze */
+}
+.leaf > i::before {
+  --c0: color-mix(in oklab, #0d1c0b, #2a4f2c calc(var(--tone) * 100%));
+  --c1: color-mix(in oklab, #1a361b, #46733a calc(var(--tone) * 100%));
+  --c2: color-mix(in oklab, #2f5429, #7ea15a calc(var(--tone) * 100%));
+  content: "";
+  position: absolute;
+  inset: 0;
   clip-path: /*@LEAF_POLY@*/;
   background:
     linear-gradient(90deg, transparent calc(50% - .035em), rgba(214, 238, 172, .62) 50%, transparent calc(50% + .035em)),
@@ -468,7 +536,6 @@ body { animation: loop-clock 28s step-end infinite; }
     radial-gradient(80% 42% at 76% 34%, rgba(176, 222, 146, .34), transparent),
     radial-gradient(70% 36% at 22% 72%, rgba(4, 14, 4, .35), transparent),
     linear-gradient(90deg, var(--c0) 0%, var(--c1) 49.6%, var(--c2) 50.4%, var(--c1) 100%);
-  /* the blade's wag comes from build.py, phase-shifted with the rest of the breeze */
 }
 
 /* ---------- flowers ---------------------------------------------------------- */
@@ -482,9 +549,6 @@ body { animation: loop-clock 28s step-end infinite; }
   width: 0;
   height: 0;
 }
-@keyframes fly {
-  from { scale: .01; }   /* not 0: a tiny bud is rasterised at load, a zero-size one only when it appears */
-}
 
 /* a faint rose shadow so overlapping blooms separate like layered washes */
 .flower::before {
@@ -496,9 +560,8 @@ body { animation: loop-clock 28s step-end infinite; }
   height: calc(var(--R) * 1.5em);
   border-radius: 50%;
   background: radial-gradient(closest-side, rgba(128, 48, 88, .12) 70%, rgba(128, 48, 88, 0));
-  animation: shadow-in 4.6s calc(var(--db) - .2s) ease-out backwards;     /* grows in with the bloom */
+  animation: var(--kn) var(--kd) var(--ks) ease-out backwards;       /* shadow-in: grows in with the bloom */
 }
-@keyframes shadow-in { from { opacity: 0; scale: .4; } }
 
 /* a soft pink flare when each bloom reaches full open */
 .halo {
@@ -510,7 +573,7 @@ body { animation: loop-clock 28s step-end infinite; }
   border-radius: 50%;
   opacity: 0;
   background: radial-gradient(closest-side, rgba(255, 206, 224, .8), rgba(255, 206, 224, .3) 55%, transparent);
-  animation: halo 2.8s calc(var(--db) + 2.6s) ease-out backwards;
+  animation: var(--kn) var(--kd) var(--ks) ease-out backwards;       /* halo */
 }
 /* eight glints that fly outward with the flare */
 .halo::after {
@@ -528,12 +591,6 @@ body { animation: loop-clock 28s step-end infinite; }
     radial-gradient(circle at 0% 50%,   #fff 0 .08em, rgba(255, 224, 236, 0) .22em),
     radial-gradient(circle at 15% 15%,  #fff 0 .05em, rgba(255, 224, 236, 0) .16em);
   rotate: 14deg;
-}
-
-@keyframes halo {
-  0%   { opacity: 0; scale: .45; }
-  30%  { opacity: 1; }
-  100% { opacity: 0; scale: 1.3; }
 }
 
 /* the head nods and breathes on its own slower clock (keyframes from build.py) */
@@ -558,9 +615,16 @@ body { animation: loop-clock 28s step-end infinite; }
   font-size: calc(var(--R) * 1em);          /* 1em inside a peony == its radius */
   perspective: calc(15em / var(--R));       /* 15 stage-ems, whatever the flower size */
   perspective-origin: 0 calc(var(--sy) * -1em);   /* vanishing point sits at the flower's centre, above its base */
-  animation: peony-grow 4.6s calc(var(--db) - .4s) var(--soft) backwards;
+  /* A turn far too small to see (it moves the rim of a bloom by less than a thousandth
+     of a pixel), and it must stay. Without it the bloom's only transform is the plain
+     scale of peony-grow, and Chrome handles a purely scaled group of layers by drawing
+     the group to an offscreen surface first: one extra pass per growing flower on every
+     frame, and when the scale lands on 1 and the surface is dropped, every petal in the
+     bloom (~80 layers) is painted again, mid-bloom. With a rotation in the mix the
+     petals are composited directly throughout, and none is painted twice. */
+  rotate: .0001deg;
+  animation: var(--kn) var(--kd) var(--ks) var(--soft) backwards;    /* peony-grow */
 }
-@keyframes peony-grow { from { scale: .62; } }
 
 /* ring recipes: outer guard petals (r1) -> tight crumpled heart (r6)
    t0/t1 = tilt closed / open, curl = how far the tip rolls back inwards */
@@ -581,22 +645,27 @@ body { animation: loop-clock 28s step-end infinite; }
    They are SIBLINGS, each carrying its own complete transform chain (the upper panel's
    chain simply continues up to the hinge and bends there).
 
-   Why the markup looks so literal: every element with a running animation gets its
-   style recomputed by the browser on every frame. So the moving part of a petal is kept
-   as cheap as it can be (plain numbers, no var()/calc()), and all the expensive colour
-   and lighting maths lives on a static child, the "skin" (.s), which is only ever
-   computed once. */
+   Why the markup looks so literal: whenever the main thread wakes, the browser
+   recomputes the style of every element with a running animation. So the moving part
+   of a petal is kept as cheap as it can be (plain numbers, no var()/calc()), and all
+   the expensive colour and lighting maths lives on a static child, the "skin" (.s),
+   which is only ever computed once.
+
+   A panel's own transform is its closed, bud pose; its animation opens it and keeps it
+   open (forwards). Until its turn comes there is then no animation in effect on it, and
+   so nothing for the compositor to tick. */
 .p, .q {
   position: absolute;
   bottom: 0;
   transform-origin: 50% 100%;
   animation-duration: 3.8s;
   animation-timing-function: cubic-bezier(.3, .12, .2, 1.25);
-  animation-fill-mode: backwards;
+  animation-fill-mode: forwards;
 }
-@supports (animation-timing-function: linear(0, 1)) {
-  .p, .q { animation-timing-function: /*@BLOOM@*/; }
-}
+
+/* The spring, once per offset from the timing grid: each class holds still, runs the
+   same 3.8s spring, and holds again until the next half-second (build.py, bloom_class). */
+/*@BLOOM_CLASSES@*/
 
 /*@PETAL_KEYFRAMES@*/
 
@@ -748,8 +817,13 @@ body { animation: loop-clock 28s step-end infinite; }
 @keyframes mote-fade { 0%, 100% { opacity: 0; } 30%, 65% { opacity: .85; } }
 
 /* ---------- accessibility ----------------------------------------------------- */
-/* Reduced motion: show the finished bouquet, perfectly still. */
+/* Reduced motion: show the finished bouquet, perfectly still. Nothing is switched off;
+   every animation is simply already over when the page opens (and none repeats), so
+   each element lands where its animation leaves it: the petals open, the rest at rest. */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; }
-  .air { display: none; }
+  *, *::before, *::after {
+    animation-delay: -999s !important;
+    animation-iteration-count: 1 !important;
+  }
+  .air, .veil { display: none; }
 }

@@ -37,19 +37,35 @@ nodding, each leaf wagging — phase-shifted by horizontal position so the wave 
 travels left to right. A flower and its stem share the *same* keyframe and pivot on the
 ribbon, so a bloom can never drift off its stem.
 
-**The loop, without script.** `<body>` runs a clock that flips a registered custom
-property (`@property --loop`) for a moment each cycle. A style query
-(`@container style(--loop: 1)`) reacts by taking the scene out of the display tree, and
-putting it back restarts every animation inside it from zero.
+**The loop, without script.** A registered custom property (`@property --loop`) is
+flipped for a moment at the end of each cycle, while a paper-coloured veil covers the
+scene. A style query (`@container … style(--loop: 1)`) reacts by switching the one-shot
+animations off, and when the flip ends they start again from zero. Nothing is removed
+from the page, so nothing is laid out or painted a second time. For the first half hour
+each flip is its own one-shot animation with a delay, which costs nothing while it
+waits; after that an ordinary repeating clock takes over.
 
-**Why it stays smooth.** Chrome restyles every element that has a running animation on
-every frame, even when the animation is composited. So anything that moves is kept
-trivial to restyle: literal numbers only, no `var()` or `calc()`, with all the expensive
-colour and lighting maths parked on a static child. Everything animated is a transform
-or an opacity — no filters, no blend modes.
+**Why it stays smooth.** Everything animated is a transform or an opacity — no filters,
+no blend modes — so the compositor can run all of it. The rest is about leaving it alone:
 
-On a 2019 Intel MacBook Pro (integrated GPU, Retina) it holds 60fps once settled and
-dips to 30–40fps at the busiest moment of the bloom.
+- *The main thread sleeps.* Starting or ending an animation wakes it, and it then
+  restyles every running animation and commits, which stalls the compositor. So every
+  one-shot is padded to start and end on a half-second grid: ~740 separate wake-ups per
+  cycle become a few dozen shared ones. What does get restyled is kept trivial: literal
+  numbers only, no `var()` or `calc()`, the colour and lighting maths parked on a static
+  child.
+- *A petal is painted once.* The petals rest in their bud pose and are opened by an
+  animation that fills forwards, and nothing above a bloom changes in a way that makes
+  the browser repaint its layers.
+- *Nothing that moves has a `clip-path`.* An outline on an animated element is an
+  offscreen pass on every frame; the leaves and sparkles carry theirs on a still child.
+
+Measured in Chrome on a 2019 Intel MacBook Pro (integrated GPU, 1440×900 at 2x): it
+holds 60fps through the bloom, the breeze and the restart, dropping about one frame a
+second at the busiest part of the bloom. Unthrottled, the same machine renders the bloom
+at about 110fps and the settled bouquet at about 150fps. The one rough moment is the
+first second after the page loads, while the 750 layers are rasterised for the first
+and only time.
 
 ## Building
 
