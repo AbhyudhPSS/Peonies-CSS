@@ -3,97 +3,72 @@
 
 usage:  python3 build.py      (writes ../index.html and ../peonies.css)
 
-Petals are emitted already sorted back-to-front for each flower, so the browser never
-has to depth-sort a 3D context.
+The picture itself is traced from the watercolour the bouquet is modelled on: every
+bloom, petal, leaf, the ribbon and the cut stems are stacks of flat washes whose outlines
+(clip-path polygons) and pigments live in shapes.py. This file gives them their place in
+the stack, their timing and their movement.
 
 Timing is emitted on a coarse grid (see GRID): every one-shot animation is widened so it
 starts and ends on a half-second, and holds still in the padding. The motion itself is
 unchanged; what changes is that the browser's main thread only has to wake a few times a
 second during the bloom, instead of on nearly every frame.
 """
-import math, random, re, os
+import math, random, os, sys
 
-SCRATCH = os.path.dirname(os.path.abspath(__file__))
-SRC_CSS = os.path.join(SCRATCH, "peonies.src.css")
-OUT_DIR = os.environ.get("OUT_DIR", os.path.dirname(SCRATCH))   # the folder above src/
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.dont_write_bytecode = True                        # (no __pycache__ left beside the sources)
+import shapes                                         # noqa: E402
+
+SRC_CSS = os.path.join(HERE, "peonies.src.css")
+OUT_DIR = os.environ.get("OUT_DIR", os.path.dirname(HERE))      # the folder above src/
 OUT_HTML = os.path.join(OUT_DIR, "index.html")
 OUT_CSS = os.path.join(OUT_DIR, "peonies.css")
 
 random.seed(11)
 
-# bundle point (top of the ribbon) where every stem starts, in stage em
-BX, BY = 10.5, 14.75
+# bundle point (just under the top of the ribbon) where every stem starts, in stage em
+BX, BY = 10.55, 14.7
 
 # ---------------------------------------------------------------- flowers
-# x,y   centre of the bloom on the stage (em, stage is 20 x 26.7)
-# R     radius of the open bloom (em)
-# open  0..1  how far the petals unfurl (round ball -> wide open)
-# tilt  rotateX of the whole bloom (negative = looks up into the cup)
-# roll  lean of the bloom   yaw: spin of the petal pattern
-# d0    when the bud leaves the bundle   db: when the petals start opening
+# Shape, place and pigment of each bloom come from shapes.py. Here: when it happens.
+#   d0   when the bud leaves the bundle on its stem
+#   db   when it starts to open
+# The blooms open front to back (the middle one first), so that each opens over, and so
+# hides, the part of its neighbours that the painting never shows.
 FLOWERS = {
-    "f7": dict(x=3.35, y=11.7, R=2.05, open=.62, tilt=-22, roll=-30, yaw=10,  d0=2.2, db=3.7, kb=-.1,  rings="1 2 3 5", sy=.30),
-    "f8": dict(x=16.9, y=11.0, R=1.55, open=.55, tilt=-20, roll=28,  yaw=40,  d0=2.5, db=4.4, kb=-.1,  rings="1 2 3 5", sy=.30),
-    "f2": dict(x=14.1, y=6.55, R=3.25, open=.52, tilt=-16, roll=14,  yaw=70,  d0=2.0, db=3.4, kb=-.15, rings="1 2 3 4 5", sy=.30),
-    "f1": dict(x=9.0,  y=4.05, R=3.45, open=.58, tilt=-16, roll=-4,  yaw=130, d0=1.5, db=2.7, kb=-.2,  rings="1 2 3 4 5 6", sy=.30),
-    "f3": dict(x=4.75, y=7.45, R=2.90, open=.55, tilt=-18, roll=-18, yaw=200, d0=1.8, db=3.1, kb=-.1,  rings="1 2 3 4 5", sy=.30),
-    "f6": dict(x=6.75, y=13.4, R=3.15, open=.78, tilt=-34, roll=-8,  yaw=260, d0=2.5, db=4.8, kb=.1,   rings="1 2 3 4 5 6", sy=.30),
-    "f5": dict(x=13.9, y=11.6, R=3.00, open=.74, tilt=-30, roll=12, yaw=320, d0=2.2, db=4.2, kb=0,    rings="1 2 3 4 5 6", sy=.30),
-    "f4": dict(x=9.2,  y=8.9,  R=3.20, open=.62, tilt=-24, roll=-3,  yaw=40,  d0=2.8, db=5.5, kb=.12,  rings="1 2 3 4 5 6", sy=.30),
+    "f4": dict(d0=1.5, db=2.7),
+    "f6": dict(d0=1.7, db=3.2),
+    "f5": dict(d0=1.9, db=3.7),
+    "f3": dict(d0=2.1, db=4.2),
+    "f1": dict(d0=2.2, db=4.6),
+    "f2": dict(d0=2.4, db=5.0),
+    "f7": dict(d0=2.6, db=5.3),
+    "f8": dict(d0=2.7, db=5.5),
 }
+for _k, _f in FLOWERS.items():
+    _f.update(x=shapes.FLOWERS[_k]["x"], y=shapes.FLOWERS[_k]["y"])
 
-RING_N = {"s": 5, "1": 8, "2": 8, "3": 7, "4": 6, "5": 5, "6": 4}
+BUD = .28                 # a bud is its bloom at this scale, with every petal folded:
+FOLD = 44                 #   stood up from the page by this many degrees,
+TWIST = -38               #   turned this far round the bloom,
+TUCK = .8                 #   and drawn in to this size
+PETAL_LAG = 1.3           # seconds between the outermost petal and the heart starting to open
 
+# Once it is open, nothing in the bouquet stays quite still: every petal breathes on its own
+# beat, every leaf wags and twists, every cut stem sways. That is what shows the picture to be
+# made of separate pieces, and not one image being rocked from side to side.
+FLUTTER_TURN = 2.4        # degrees a petal swings about the heart of its bloom (the outermost; less further in)
+FLUTTER_SWELL = .026      # ...and how far it swells and draws in
+FLUTTER_BEATS = (5.3, 6.1, 7.0, 7.9, 8.9)     # seconds: each petal keeps one of these
+LEAF_WAG = 3.8            # degrees a leaf wags about the point it springs from
+LEAF_WAG_OF = {"A": 2.6, "H3": 2.2}           # (these two lie along the rim of a bloom: gentler)
+LEAF_TWIST = .09          # how far a leaf turns edge-on as it wags (share of its width)
+NOD = 1.7                 # degrees a flower head nods about the top of its stem
+BREATH = .016             # ...and how far it swells
+STALK_SWAY = (1.2, 1.9)   # degrees a cut stem sways about the point it hangs from (each its own, in this range)
 
-# ---------------------------------------------------------------- ring recipes (read from the CSS so they can't drift)
-def parse_recipes(css):
-    out = {}
-    for m in re.finditer(r"^\.(r[1-6]|rs)\s*\{(.*?)\}", css, re.S | re.M):
-        d = {}
-        for k, v in re.findall(r"--([\w]+):\s*([^;]+);", m.group(2)):
-            d[k] = float(re.sub(r"[a-z]+$", "", v.strip()))
-        out[m.group(1)[1:]] = d
-    return out
-
-
-SRC = open(SRC_CSS).read()
-RECIPES = parse_recipes(SRC)
-assert set(RECIPES) == {"1", "2", "3", "4", "5", "6", "s"}, RECIPES.keys()
-
-
-# ---------------------------------------------------------------- painter's order
-def rx(v, d):
-    x, y, z = v; c, s = math.cos(math.radians(d)), math.sin(math.radians(d))
-    return (x, y * c - z * s, y * s + z * c)
-
-
-def ry(v, d):
-    x, y, z = v; c, s = math.cos(math.radians(d)), math.sin(math.radians(d))
-    return (x * c + z * s, y, -x * s + z * c)
-
-
-def depths(ring, i, n, j, f):
-    """View-space depth (bigger = nearer the viewer) of a petal's lower and upper panel at full bloom."""
-    rc = RECIPES[ring]
-    a = 360 * i / n + rc["off"] + j * 8
-    to = rc["t0"] + (rc["t1"] - rc["t0"]) * f["open"] + j * 4
-    hl = rc["ph"] * .5
-    hu = hl * 1.2
-    hinge = (0, -hl + .03, 0)
-    up = rx((0, -hu / 2, 0), rc["curl"])
-    lower = (0, -hl / 2, 0)
-    upper = (hinge[0] + up[0], hinge[1] + up[1], hinge[2] + up[2])
-
-    def place(p):
-        p = rx(p, to)
-        p = (p[0], p[1], p[2] - rc["r"])
-        p = ry(p, a)
-        p = (p[0], p[1] - rc["y"], p[2])
-        p = ry(p, f["yaw"])
-        p = rx(p, f["tilt"])
-        return p
-
-    return place(lower)[2], place(upper)[2]
+dice = random.Random(23)  # for all of the above, so that adding to it never reshuffles the rest
 
 
 def fmt(x, nd=3):
@@ -108,14 +83,21 @@ def fmt(x, nd=3):
     return s
 
 
-KEYFRAMES = []          # @keyframes blocks, one per panel (literal numbers only)
+def washes(layers):
+    """A stack of flat washes: one still box per wash, each cut to its outline. They sit
+    inside the element that moves, so each outline is cut once, when that element is
+    first painted, and never again."""
+    return "".join(f'<b style="clip-path:polygon({poly});background:{col}"></b>' for col, poly in layers)
+
+
+KEYFRAMES = []          # @keyframes blocks, one per petal, gust or padded one-shot (literal numbers only)
 
 
 # ---------------------------------------------------------------- the grid
 # Starting or finishing an animation is the one thing the compositor cannot do alone: the
 # main thread has to wake, restyle every animation that is running, and commit the result,
-# which stalls the compositor for most of a frame. With ~740 one-shot animations each on
-# its own delay that was happening on almost every frame of the bloom.
+# which stalls the compositor for most of a frame. With hundreds of one-shot animations each
+# on its own delay that was happening on almost every frame of the bloom.
 #
 # So every one-shot is widened to the nearest half-second on both sides, and holds its
 # first / last pose in the padding. All the starts and ends now land together on a few
@@ -177,53 +159,79 @@ def bloom_class(delay):
     return BLOOM_EASE[key], start
 
 
-def petals_for(f):
-    """Every panel (lower .p and upper .q of every petal), farthest first."""
-    items = []
-    for ring in ["s"] + f["rings"].split():
-        n = RING_N[ring]
-        for i in range(n):
-            j = round(random.uniform(-1, 1), 2)
-            m = round(random.uniform(-1, 1), 2)
-            zl, zu = depths(ring, i, n, j, f)
-            items.append((zl, "p", ring, i, n, j, m))
-            items.append((zu, "q", ring, i, n, j, m))
-    items.sort(key=lambda t: t[0])           # farthest first
-    return items
+# ---------------------------------------------------------------- leaves
+# Outline, place and pigment of every leaf are traced from the painting (shapes.py).
+# Each leaf belongs to the bloom it grows beside, and lives inside it, under its petals:
+# it rides out of the bundle with that bud, grows as the bud grows, and flexes and nods
+# with it in the breeze, so a leaf and its bloom can never drift apart. (Stacked like
+# this, back to front, everything still overlaps exactly as it does in the painting.)
+LEAVES_OF = {"f2": "C F", "f1": "A", "f3": "B H2 H3", "f5": "G1 G2", "f6": "I1 I2", "f4": "D E H1"}
 
 
-def panel_html(f, panel, ring, i, n, j, m):
-    """One petal panel with every number baked in, so the moving element is trivial to restyle."""
-    rc = RECIPES[ring]
-    a = 360 * i / n + rc["off"] + j * 8
-    to = rc["t0"] + (rc["t1"] - rc["t0"]) * f["open"] + j * 4
-    w = rc["pw"] * (1 + m * .09)
-    ph = rc["ph"]
-    ease, begin = bloom_class(f["db"] + rc["rd"] + i * .07)
-    # The bloom's spin (yaw) and the petal's own place round the ring (a) are both turns
-    # about the same axis, with only a slide along that axis between them, so they are
-    # written as one rotateY: the same motion, one less function to blend per frame.
-    pose = pose0 = f'rotateZ({fmt(f["roll"])}deg) rotateX({fmt(f["tilt"])}deg)'
-    chain = f'translateY({fmt(-rc["y"])}em) rotateY({fmt(f["yaw"] + a)}deg) translateZ({fmt(-rc["r"])}em) rotateX({fmt(to)}deg)'
-    chain0 = f'translateY({fmt(-rc["y0"])}em) rotateY({fmt(f["yaw"] - 50 + a - 45)}deg) translateZ({fmt(-rc["r0"])}em) rotateX({fmt(rc["t0"])}deg)'
+def leaf(name, f, k):
+    s = shapes.LEAVES[name]
+    ls = round(random.uniform(4.6, 7.4), 1)                 # its own flutter period
+    wag = (f'{wind_kf(GUST, LEAF_WAG_OF.get(name, LEAF_WAG), twist=LEAF_TWIST)} {fmt(ls, 2)}s '
+           f'{fmt(wind_phase(s["x"]) - dice.uniform(0, ls), 2)}s linear infinite')
+    # it unfurls as its bloom starts to open, swinging out from nearer the stem
+    swing = -math.copysign(min(60, abs(s["dir"]) * .5), s["dir"])
+    unfurl = held_vars("unfurl", [(0, f"scale:.05;rotate:{fmt(swing, 1)}deg"), (100, "scale:1;rotate:0deg")],
+                       round(f["db"] - .5 + k * .3, 1), 2.6)
+    return (f'          <i class="leaf" style="--x:{fmt(s["x"] - f["x"])};--y:{fmt(s["y"] - f["y"])};'
+            f'--lw:{s["w"]}em;--lh:{s["h"]}em;--dir:{s["dir"]}deg;{unfurl}">'
+            f'<i style="animation:{wag}">{washes(s["layers"])}</i></i>')
+
+
+FLUTTER = {}            # (curve, strength) -> keyframes name
+BEATS = set()           # (opening class, its padded length, beat) in use
+
+
+def flutter_kf(curve, level):
+    """A petal's breathing: a small turn about the heart of its bloom and a small swell, each
+    following a gust of its own, so that the two never move in step. It animates `rotate` and
+    `scale`, which leaves `transform` to the opening."""
+    key = (curve, level)
+    if key not in FLUTTER:
+        turn, swell = (GUST, shifted(NODS, .4)) if curve == 0 else (NODS, shifted(GUST, .27))
+        k = (.45, .72, 1.0)[level]
+        n = 20
+        step = (len(turn) - 1) // n
+        frames = "".join(
+            fmt(i / n * 100, 2) + "%{rotate:" + fmt(turn[i * step] * FLUTTER_TURN * k, 3) + "deg;scale:"
+            + fmt(1 + swell[i * step] * FLUTTER_SWELL * k, 4) + "}" for i in range(n + 1))
+        FLUTTER[key] = "fl%d" % len(FLUTTER)
+        KEYFRAMES.append("@keyframes " + FLUTTER[key] + "{" + frames + "}")
+    return FLUTTER[key]
+
+
+def petal_html(f, q, p, far):
+    """One petal: a box of washes that rests folded up into the bud, and is opened by a
+    keyframe of its own. Every number is baked in, so the moving element is trivial to
+    restyle."""
+    # (to the tenth of a second, so that petals share a handful of padded easings)
+    delay = round(f["db"] + (1 - p["dist"] / far) * PETAL_LAG + random.uniform(0, .12), 1)
+    ease, begin = bloom_class(delay)
+    # the fold is a turn about the line through the bloom's opening point that lies in the
+    # page, square to the way the petal points: the petal stands up towards the eye
+    axis = f'{fmt(-p["uy"])},{fmt(p["ux"])},0'
     name = f"k{len(KEYFRAMES)}"
-    if panel == "p":
-        geom = f"left:{fmt(-w / 2)}em;width:{fmt(w)}em;height:{fmt(ph * .5)}em"
-        final = f"{pose} {chain} scale(1)"
-        start = f"{pose0} {chain0} scale(.72,1)"
-    else:
-        hinge = -ph * .5 + .03
-        geom = f"left:{fmt(-w * .55)}em;width:{fmt(w * 1.1)}em;height:{fmt(ph * .6)}em"
-        final = f"{pose} {chain} translateY({fmt(hinge)}em) scale(1,1) rotateX({fmt(rc['curl'])}deg)"
-        start = f"{pose0} {chain0} translateY({fmt(hinge)}em) scale(.62,1) rotateX({fmt(rc['curl0'])}deg)"
-    # The panel rests in its bud pose and the keyframe carries it to the open one, which
-    # the animation then keeps (fill: forwards). The other way round (resting open, held
-    # shut by the animation until its turn) looks the same but costs: an animation that
-    # is holding a pose is ticked on every frame, and all 632 would be from the first.
+    final = f"rotate(0deg) rotate3d({axis},0deg) scale(1)"
+    start = f"rotate({TWIST}deg) rotate3d({axis},{-FOLD}deg) scale({fmt(TUCK)})"
+    # The petal rests folded and the keyframe carries it open, which the animation then
+    # keeps (fill: forwards). The other way round (resting open, held shut by the animation
+    # until its turn) looks the same but costs: an animation that is holding a pose is
+    # ticked on every frame, and every petal would be from the first.
     KEYFRAMES.append(f"@keyframes {name}{{to{{transform:{final}}}}}")
-    style = (f"--i:{i};--n:{n};--j:{fmt(j, 2)};--m:{fmt(m, 2)};{geom};transform:{start};"
-             f"animation-name:{name};animation-delay:{fmt(begin, 2)}s")
-    return f'          <i class="{panel} r{ring} {ease}" style="{style}"><i class="s"></i></i>'
+    # ...and from then on it breathes: the outer petals most, each on its own beat
+    reach = p["dist"] / far
+    flutter = flutter_kf(dice.randrange(2), 2 if reach > .66 else 1 if reach > .33 else 0)
+    beat = dice.randrange(len(FLUTTER_BEATS))
+    BEATS.add((ease, window(delay, BLOOM_DUR)[1], beat))
+    style = (f'left:{fmt(p["x"] - f["x"])}em;top:{fmt(p["y"] - f["y"])}em;width:{p["w"]}em;height:{p["h"]}em;'
+             f'transform-origin:{fmt(q[0] - p["x"])}em {fmt(q[1] - p["y"])}em;transform:{start};'
+             f"animation-name:{name},{flutter};"
+             f"animation-delay:{fmt(begin, 2)}s,{fmt(-dice.uniform(0, FLUTTER_BEATS[beat]), 2)}s")
+    return f'          <i class="p {ease} b{beat}" style="{style}">{washes(p["layers"])}</i>'
 
 
 def origin(f):
@@ -233,32 +241,41 @@ def origin(f):
 
 
 def flower(fid, f):
-    petals = "\n".join(panel_html(f, panel, ring, i, n, j, m) for _, panel, ring, i, n, j, m in petals_for(f))
+    sh = shapes.FLOWERS[fid]
+    q = (sh["qx"], sh["qy"])
+    far = max(p["dist"] for p in sh["petals"])
+    petals = "\n".join(petal_html(f, q, p, far) for p in sh["petals"])
+    foliage = "".join(leaf(n, f, k) + "\n" for k, n in enumerate(LEAVES_OF.get(fid, "").split()))
     ox, oy = origin(f)
-    nod_period = round(random.uniform(7.4, 9.9), 1)        # each head keeps its own time
-    nod = (f'{wind_kf(NOD, 1.7, scale_amp=.022)} {nod_period}s '
+    # the head nods about the point where its stem holds it, and keeps its own time
+    nod_period = round(random.uniform(7.4, 9.9), 1)
+    nod = (f'{wind_kf(NODS, NOD, scale_amp=BREATH)} {nod_period}s '
            f'{fmt(wind_phase(f["x"]) * .6, 2)}s linear infinite')
     db = f["db"]
     # the bud rides out on its stem (same window as the stem, see arm()); not from 0: a
     # tiny bud is rasterised at load, a zero-size one only when it appears
     fly, fly_s, fly_t = held("fly", [(0, "scale:.01"), (100, "scale:1")], f["d0"], STEM_DUR)
-    # a faint shadow grows in with the bloom, and a flare goes off as it reaches full open
-    shadow = held_vars("shadow-in", [(0, "opacity:0;scale:.4"), (100, "opacity:1;scale:1")], db - .2, 4.6)
+    # a flare goes off as the bloom reaches full open
     halo = held_vars("halo", [(0, "opacity:0;scale:.45"), (30, "opacity:1"), (100, "opacity:0;scale:1.3")], db + 2.6, 2.8)
-    grow = held_vars("peony-grow", [(0, "scale:.62"), (100, "scale:1")], db - .4, 4.6)
+    grow = held_vars("peony-grow", [(0, f"scale:{fmt(BUD)}"), (100, "scale:1")], db - .2, 4.4)
+    # under the open petals, a wash or two in the bloom's own tones (see .deep in the stylesheet)
+    under = ""
+    if sh.get("deep"):
+        fade = held_vars("deep-in", [(0, "opacity:0"), (100, "opacity:1")], db + 2.6, 2.2)
+        under = f'          <i class="deep" style="{fade}">{washes(sh["deep"])}</i>\n'
+    s = sh["s"]
+    at = f'{fmt(q[0] - f["x"])}em {fmt(q[1] - f["y"])}em'       # the opening point, from the middle of the bloom
     style = (
-        f'--fx:{f["x"]};--fy:{f["y"]};--bx:{ox};--by:{oy};--R:{f["R"]};--open:{f["open"]};'
-        f'--tilt:{f["tilt"]}deg;--roll:{f["roll"]}deg;--yaw:{f["yaw"]}deg;'
-        f'--sy:{f["sy"]};--kb:{f["kb"]};{shadow};--wind:{f["_wind"].split()[0]};'
+        f'--fx:{f["x"]};--fy:{f["y"]};--S:{s};--wind:{f["_wind"].split()[0]};'
         f'transform-origin:{fmt(ox - f["x"])}em {fmt(oy - f["y"])}em;'
         f'animation:{fly} {fmt(fly_t, 2)}s {fmt(fly_s, 2)}s cubic-bezier(.22,.75,.25,1) backwards,{f["_wind"]}'
     )
     return f'''    <div class="flower {fid}" style="{style}">
       <i class="halo" style="{halo}"></i>
-      <div class="orient" style="animation:{nod}">
-        <div class="peony" style="{grow}">
-          <i class="core"></i>
-{petals}
+      <div class="orient" style="transform-origin:{at};animation:{nod}">
+        <div class="peony" style="transform-origin:{at};perspective-origin:{at};{grow}">
+{foliage}          <i class="ball" style="--m:{sh["mid"]};clip-path:polygon({sh["body"]})"></i>
+{under}{petals}
         </div>
       </div>
     </div>'''
@@ -268,27 +285,28 @@ STEM_DUR = 2.1            # how long a stem takes to grow (and its bud to ride o
 
 
 def stem_amp(ln):
-    """A longer stem flexes further. Degrees at the ribbon."""
-    return 1.1 + .22 * ln
+    """A longer stem flexes further. Degrees at the ribbon. Kept modest: the blooms are
+    packed against each other, as painted, and each runs on only so far under its
+    neighbours (shapes.py), so they must not slide far over one another. The broad sway
+    is the whole bunch leaning together (BOUQUET_WIND)."""
+    return .45 + .07 * ln
 
 
-def arm(f):
-    """Stem from the ribbon top to the flower's base (where the calyx sits)."""
+def arm(fid, f):
+    """Stem from the ribbon to the point the bloom opens from."""
     ox, oy = origin(f)
-    bx, by = f["x"], f["y"] + f["R"] * f["sy"]
+    bx, by = shapes.FLOWERS[fid]["qx"], shapes.FLOWERS[fid]["qy"]
     dx, dy = bx - ox, by - oy
     ln = math.hypot(dx, dy)
     ang = math.degrees(math.atan2(dx, -dy))
-    f["_armlen"] = ln
     f["_wind"] = wind_anim(GUST, stem_amp(ln), f["x"])      # shared with the flower
-    grow = held_vars("stem-grow", [(0, "scale:1 0"), (100, "scale:1 1")], f["d0"], STEM_DUR)
-    return (f'    <div class="arm" style="--bx:{ox};--by:{oy};--ang:{ang:.1f}deg;--len:{ln:.2f}em;'
+    # (from .01, like the bud that rides on it: see flower(). Unlike the bud, a stem that
+    # short is still a visible dash, so it is kept out of sight until it sets out.)
+    grow = held_vars("stem-grow", [(0, "scale:1 .01;opacity:0"), (5, "opacity:1"), (100, "scale:1 1;opacity:1")],
+                     f["d0"], STEM_DUR)
+    return (f'    <div class="arm" style="--bx:{ox};--by:{oy};--ang:{ang:.2f}deg;--len:{ln:.3f}em;'
             f'animation:{f["_wind"]}">'
             f'<i class="stem" style="{grow}"></i></div>')
-
-
-def stemmed(keys):
-    return "\n".join(arm(FLOWERS[k]) + "\n" + flower(k, FLOWERS[k]) for k in keys)
 
 
 # ---------------------------------------------------------------- the breeze
@@ -316,7 +334,7 @@ def samples(harmonics, n=40):
 
 
 GUST = samples(GUST_HARMONICS)
-NOD = samples(NOD_HARMONICS)
+NODS = samples(NOD_HARMONICS)
 
 
 def wind_phase(x):
@@ -333,16 +351,21 @@ def shifted(curve, frac):
     return [curve[(k + off) % n] for k in range(n)] + [curve[off % n]]
 
 
-def wind_kf(curve, amp, scale_amp=None, sway_em=None):
+def wind_kf(curve, amp, scale_amp=None, sway_em=None, twist=None):
     """Emit one literal keyframe block for a gust and return its name.
     sway_em adds a sideways drift, so even a flower on a short, nearly horizontal
-    stem (which rotation alone would mostly bob up and down) still travels across."""
+    stem (which rotation alone would mostly bob up and down) still travels across.
+    twist narrows the element about its own axis out of step with the turn: a leaf
+    showing more or less of its face."""
     drift = shifted(curve, .18) if sway_em else None
+    turn = shifted(curve, .31) if twist else None
     frames = []
     n = len(curve) - 1
     for k, v in enumerate(curve):
         t = "" if drift is None else "translateX(" + fmt(drift[k] * sway_em, 3) + "em) "
         decl = "transform:" + t + "rotate(" + fmt(v * amp, 3) + "deg)"
+        if turn is not None:
+            decl += " scaleX(" + fmt(1 - twist * (turn[k] * .5 + .5), 4) + ")"
         if scale_amp is not None:
             decl += ";scale:" + fmt(1 + (v * .5 + .5) * scale_amp, 4)
         frames.append(fmt(k / n * 100, 2) + "%{" + decl + "}")
@@ -357,62 +380,103 @@ def wind_anim(curve, amp, x, **kw):
         wind_kf(curve, amp, **kw), fmt(WIND_PERIOD, 2), fmt(wind_phase(x), 2))
 
 
-# ---------------------------------------------------------------- leaves
-# base (x,y) in em, dir = direction of the tip in degrees clockwise from "up",
-# L length, W width, d = delay, tone 0 (very dark) .. 1 (lighter)
-LEAVES = {
-    1: [  # behind everything
-        dict(x=5.85, y=5.15, dir=-31, L=3.0, W=1.45, d=3.2, tone=.35),   # A top-left
-        dict(x=12.3, y=4.15, dir=33,  L=3.1, W=1.5,  d=3.0, tone=.25),   # C top-right
-        dict(x=16.4, y=6.3,  dir=63,  L=1.5, W=.75,  d=4.2, tone=.7),    # F small right
-    ],
-    2: [  # between back and front flowers
-        dict(x=6.7, y=6.55, dir=-6,  L=2.7, W=1.0,  d=3.5, tone=.5),     # B
-        dict(x=11.5, y=7.1, dir=-17, L=2.9, W=1.25, d=3.9, tone=.3),     # D
-        dict(x=11.9, y=7.55, dir=50, L=3.5, W=1.8,  d=4.1, tone=.2),     # E
-        dict(x=6.4, y=9.85, dir=-124, L=3.7, W=1.7, d=4.3, tone=.3),     # I left big
-        dict(x=3.8, y=9.65, dir=-100, L=2.15, W=.7, d=4.6, tone=.15),    # I2 small
-    ],
-    3: [
-        dict(x=15.4, y=8.75, dir=66,  L=3.2, W=1.25, d=5.0, tone=.45),   # G
-        dict(x=15.6, y=8.9,  dir=108, L=3.1, W=1.35, d=5.2, tone=.2),    # H
-    ],
-    4: [  # in front of everything
-        dict(x=10.25, y=12.9, dir=98, L=2.2, W=.95, d=5.6, tone=.25),    # J
-        dict(x=11.5, y=15.7, dir=-30, L=2.45, W=1.15, d=5.8, tone=.4),   # K
-    ],
-}
+def flowers(keys):
+    return "\n".join(flower(k, FLOWERS[k]) for k in keys.split())
 
 
-def leaf(l):
-    f = l.get("f", 1)
-    ls = round(random.uniform(4.6, 7.4), 1)                 # its own flutter period
-    wag = (f'{wind_kf(GUST, 3.6 + l["L"] * .35)} {fmt(ls * 1.45, 2)}s '
-           f'{fmt(wind_phase(l["x"]), 2)}s linear infinite')
-    unfurl = held_vars("unfurl", [(0, "scale:0;rotate:-30deg"), (100, "scale:1;rotate:0deg")], l["d"], 2.4)
-    return (f'    <i class="leaf" style="--x:{l["x"]};--y:{l["y"]};--lw:{l["W"]*1.15:.2f}em;--lh:{l["L"]*1.12:.2f}em;'
-            f'--dir:{l["dir"]}deg;--f:{f};--tone:{l["tone"]};{unfurl}">'
-            f'<i style="animation:{wag}"></i></i>')
+def boxed(sh):
+    return f'left:{sh["x"]}em;top:{sh["y"]}em;width:{sh["w"]}em;height:{sh["h"]}em'
 
 
-def leaves(layer):
-    return "\n".join(leaf(l) for l in LEAVES[layer])
+# ---------------------------------------------------------------- the ribbon
+def satin():
+    """The ribbon's washes, and over them a soft light that travels up and down the satin.
+    (The light is a blurred spot narrower than the ribbon, so it needs no outline cut for
+    it: it has faded away before it reaches the ribbon's edge.)"""
+    return washes(shapes.RIBBON["layers"]) + '<i class="sheen"></i>'
 
 
-# ---------------------------------------------------------------- bunch below ribbon
+# ---------------------------------------------------------------- the cut stems
 def stalks():
+    """The cut stems below the ribbon, a strip for each (shapes.py): every one hangs from
+    its own point under the ribbon and sways there on its own beat."""
+    cut = shapes.STEMS
+    x0, y0 = min(c["x"] for c in cut), min(c["y"] for c in cut)
+    x1, y1 = max(c["x"] + c["w"] for c in cut), max(c["y"] + c["h"] for c in cut)
     out = []
-    n = 10
-    for i in range(n):
-        t = i / (n - 1)
-        x = 9.55 + t * 1.85 + random.uniform(-.1, .1)
-        ang = -5 + t * 15 + random.uniform(-2.5, 2.5)
-        ln = 4.3 + random.uniform(-.4, .9) + (1 - abs(t - .55)) * .5
-        hue = random.choice(["#7d8d3e", "#6b8441", "#76876a", "#5f7d55", "#8a9748", "#677f74", "#72863f"])
-        grow = held_vars("stalk-grow", [(0, "scale:1 0"), (100, "scale:1 1")], round(.2 + i * .07, 2), 1.5)
+    for k, c in enumerate(cut):
+        beat = dice.uniform(5.2, 8.4)
+        sway = (f'{wind_kf(GUST if k % 2 else NODS, dice.uniform(*STALK_SWAY))} {fmt(beat, 2)}s '
+                f'{fmt(-dice.uniform(0, beat), 2)}s linear infinite')
+        out.append(f'        <i class="stalk" style="left:{fmt(c["x"] - x0)}em;top:{fmt(c["y"] - y0)}em;'
+                   f'width:{c["w"]}em;height:{c["h"]}em;'
+                   f'transform-origin:{fmt(c["px"] - c["x"])}em {fmt(c["py"] - c["y"])}em;animation:{sway}">'
+                   f'{washes(c["layers"])}</i>')
+    box = f'left:{fmt(x0)}em;top:{fmt(y0)}em;width:{fmt(x1 - x0)}em;height:{fmt(y1 - y0)}em'
+    return f'      <div class="bunch" style="{box};{STEMS_UP}">\n' + "\n".join(out) + "\n      </div>"
+
+
+# ---------------------------------------------------------------- waves
+# Behind the bouquet, washes with a rolling edge drift across the page, the nearer ones
+# shorter, lower and quicker. Each is a strip one wavelength wider than the page with the
+# swell cut along its top; it slides sideways by exactly one wavelength and starts again,
+# which cannot be seen. Lengths across are in vw (the washes span the page), lengths down
+# in stage em (they keep their place behind the bouquet).
+#   top    where the crest lies (em from the top of the stage)    swell  its height (em)
+#   span   one wavelength (vw)     beat  seconds to travel it     way  -1 leftwards, 1 rightwards
+#   rise   when it wells up        tint, a  its pigment and strength
+WAVES = [
+    dict(top=11.2, swell=1.9,  span=62.0, beat=31, way=-1, rise=.3,  tint=(168, 200, 222), a=.36),
+    dict(top=14.2, swell=1.6,  span=48.0, beat=25, way=1,  rise=.7,  tint=(140, 182, 214), a=.34),
+    dict(top=17.2, swell=1.35, span=38.0, beat=19, way=-1, rise=1.1, tint=(118, 166, 206), a=.40),
+    dict(top=20.2, swell=1.1,  span=30.0, beat=14, way=1,  rise=1.5, tint=(96, 148, 196), a=.36),
+]
+WAVE_DEPTH = 7.5          # em: how far down a wash runs before it has faded away
+WAVE_RIM = .1             # em: the line of pooled pigment along its edge
+WAVE_LIGHT = .55          # em: the paler band just under it, where the swell catches the light
+
+
+def wave_edge(w, per=30):
+    """The rolling edge as (x%, y em) along a strip: crests a little sharper than the troughs
+    and leaning the way they travel, and exactly one `span` long per roll, so that the
+    strip can slide by one span and start again unseen."""
+    width = 100 + w["span"]
+    n = math.ceil(width / w["span"] * per)
+    pts = []
+    for k in range(n + 1):
+        x = min(width, k * w["span"] / per)
+        th = math.tau * x / w["span"]
+        lean = th + .28 * w["way"] * math.sin(th)              # (crests lean forward)
+        roll = (.5 + .5 * math.sin(lean)) ** 1.5               # 0 trough .. 1 crest
+        roll += .07 * math.sin(2 * th + 1.1) + .04 * math.sin(3 * th + 2.3)
+        pts.append((x / width * 100, w["swell"] * (1 - roll) / 1.11))
+    return pts
+
+
+def waves():
+    out = []
+    for k, w in enumerate(WAVES):
+        depth = WAVE_DEPTH + w["swell"]
+        edge = wave_edge(w)
+        pct = lambda pts: ",".join(f"{fmt(x, 2)}% {fmt(y / depth * 100, 2)}%" for x, y in pts)
+        wash = pct(edge) + ",100% 100%,0 100%"
+        rim = pct(edge) + "," + pct([(x, y + WAVE_RIM) for x, y in reversed(edge)])
+        light = pct([(x, y + WAVE_RIM) for x, y in edge]) + "," + pct([(x, y + WAVE_RIM + WAVE_LIGHT) for x, y in reversed(edge)])
+        drift = "drift-%d" % k
+        KEYFRAMES.append("@keyframes %s{to{translate:%svw 0}}" % (drift, fmt(-w["span"], 3)))
+        bob = dice.uniform(3.6, 5.2)
+        rise = held_vars("wave-rise", [(0, "translate:0 62vh"), (100, "translate:0 0")], w["rise"], 3.4)
+        r, g, b = w["tint"]
         out.append(
-            f'      <i class="stalk" style="--x:{x:.2f};--ang:{ang:.1f}deg;--len:{ln:.2f}em;--c:{hue};{grow}"></i>'
-        )
+            f'      <div class="wave" style="top:{w["top"]}em;height:{fmt(depth)}em;{rise}">'
+            f'<i style="width:{fmt(100 + w["span"], 3)}vw;'
+            f'animation:{drift} {w["beat"]}s linear infinite{" reverse" if w["way"] > 0 else ""},'
+            f'wave-bob {fmt(bob, 2)}s {fmt(-dice.uniform(0, bob), 2)}s ease-in-out infinite alternate">'
+            f'<b style="clip-path:polygon({wash});'
+            f'background:linear-gradient(rgb({r} {g} {b}/{w["a"]}),rgb({r} {g} {b}/{fmt(w["a"] * .5, 2)}) 38%,rgb({r} {g} {b}/0))"></b>'
+            f'<b style="clip-path:polygon({light});background:rgb(255 255 255/.22)"></b>'
+            f'<b style="clip-path:polygon({rim});background:rgb({round(r * .8)} {round(g * .82)} {round(b * .84)}/{fmt(min(1, w["a"] * 1.4), 2)})"></b>'
+            f'</i></div>')
     return "\n".join(out)
 
 
@@ -452,16 +516,16 @@ def motes():
 
 def splats():
     out = []
-    cols = ["#f3b8c8", "#eaa0b6", "#f7d0da", "#c9d9b8", "#a9c2a0", "#f0c2cc", "#b8cdd3"]
+    cols = ["#e6c3cb", "#dcafba", "#efd9dd", "#c3d2b6", "#a8bda1", "#e4c9cd", "#b8cdd3"]
     for i in range(26):
         ang = random.uniform(0, math.tau)
-        rad = random.uniform(6.2, 11.2)
+        rad = random.uniform(7.4, 11.4)
         x = 10 + math.cos(ang) * rad * .95
         y = 11.8 + math.sin(ang) * rad * 1.1
         s = round(random.choice([.12, .18, .26, .34, .5, .7]) * random.uniform(.8, 1.2), 2)
         c = random.choice(cols)
         d = round(.9 + random.uniform(0, 5.2), 2)
-        pop = held_vars("splat", [(0, "scale:0;opacity:0"), (100, "scale:1;opacity:.65")], d, .9)
+        pop = held_vars("splat", [(0, "scale:0;opacity:0"), (100, "scale:1;opacity:.5")], d, .9)
         out.append(f'      <i style="--x:{x:.2f};--y:{y:.2f};--s:{s}em;--c:{c};{pop}"></i>')
     return "\n".join(out)
 
@@ -538,8 +602,11 @@ BOUQUET_WIND = "%s %ss 0s linear infinite" % (
 WASHES = "".join(
     '<i style="%s"></i>' % held_vars("wash-in", [(0, "opacity:0;scale:.35"), (100, "opacity:1;scale:1")], d, 7)
     for d in (.3, 1.1, 1.6, 2.1))
-WRAP_IN = held_vars("wrap-in", [(0, "scale:1.22 1"), (100, "scale:1 1")], 1.45, 1.7)
-WRAP_UP = held_vars("wrap-up", [(0, "translate:0 100%"), (100, "translate:0 0")], 1.45, 1.7)
+# the cut stems grow up from their ends, the ribbon wraps round them, and only then do the
+# buds set out (FLOWERS, d0)
+STEMS_UP = held_vars("stems-up", [(0, "scale:1 .01"), (100, "scale:1 1")], .2, 1.5)
+WRAP_IN = held_vars("wrap-in", [(0, "scale:1.22 1"), (100, "scale:1 1")], .8, 1.6)
+WRAP_UP = held_vars("wrap-up", [(0, "translate:0 100%"), (100, "translate:0 0")], .8, 1.6)
 CREDIT_IN = held_vars("credit-in", [(0, "opacity:0;transform:translateY(.8em)"), (100, "opacity:1;transform:translateY(0)")], 3.2, 2)
 
 # ---------------------------------------------------------------- the loop clock
@@ -565,6 +632,10 @@ def clock():
 
 
 # ---------------------------------------------------------------- assemble HTML
+# The stems come first, every one, so that they stay inside the bunch; each shares its
+# keyframe with its flower (arm() makes it, flower() reuses it).
+ARMS = "\n".join(arm(k, FLOWERS[k]) for k in FLOWERS)
+
 html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -575,7 +646,7 @@ html = f'''<!DOCTYPE html>
   <link rel="stylesheet" href="peonies.css">
 </head>
 <body>
-  <!-- Pure HTML + CSS: no JavaScript, no images, no SVG. Everything you see is gradients, transforms and keyframes. -->
+  <!-- Pure HTML + CSS: no JavaScript, no images, no SVG. Everything you see is clip-paths, gradients, transforms and keyframes. -->
   <div class="paper"></div>
 
   <!-- (this wrapper holds the loop's spare clock: see THE LOOP in the stylesheet) -->
@@ -585,6 +656,11 @@ html = f'''<!DOCTYPE html>
 {title_html()}
     <div class="stage" role="img" aria-label="A bouquet of pink peonies blossoming against watercolour paper" style="--bx:{BX};--by:{BY}">
 
+      <!-- behind everything: washes with a rolling edge, drifting across the page -->
+      <div class="waves" aria-hidden="true">
+{waves()}
+      </div>
+
       <div class="wash">{WASHES}</div>
       <div class="splats">
 {splats()}
@@ -593,36 +669,13 @@ html = f'''<!DOCTYPE html>
       <!-- everything that is actually held: it leans together in the breeze -->
       <div class="bouquet" style="animation:{BOUQUET_WIND}">
 
-      <!-- the bunch below the ribbon + the ribbon itself -->
-      <div class="bunch">
+      <!-- the cut stems below the ribbon, the stems inside the bunch, and the ribbon round them -->
 {stalks()}
-      </div>
-      <div class="ribbon" style="{WRAP_IN}"><div class="ribbon__band" style="{WRAP_UP}"></div></div>
+{ARMS}
+      <div class="ribbon" style="{boxed(shapes.RIBBON)};{WRAP_IN}"><div class="ribbon__band" style="{WRAP_UP}">{satin()}</div></div>
 
-      <div class="leaves leaves--1">
-{leaves(1)}
-      </div>
-
-      <!-- every flower is preceded by its own stem, so stems pass over the blooms behind
-           them and tuck under the bloom they belong to -->
-{stemmed(["f7", "f8"])}
-{stemmed(["f2", "f1", "f3"])}
-
-      <div class="leaves leaves--2">
-{leaves(2)}
-      </div>
-
-{stemmed(["f6", "f5"])}
-
-      <div class="leaves leaves--3">
-{leaves(3)}
-      </div>
-
-{stemmed(["f4"])}
-
-      <div class="leaves leaves--4">
-{leaves(4)}
-      </div>
+      <!-- the blooms, back to front as in the painting, each with its leaves -->
+{flowers("f7 f8 f2 f1 f3 f5 f6 f4")}
 
       </div><!-- /.bouquet -->
 
@@ -662,27 +715,18 @@ def spring(zeta, n):
 def bloom_classes():
     """The petal spring, held still before and after so the animation spans whole grid
     steps. Stops with no position are spread evenly between their neighbours, so the
-    spring keeps exactly the shape it has on its own."""
+    spring keeps exactly the shape it has on its own. A petal runs two animations, the
+    opening and then its breathing, so every list here has two entries: the lengths of the
+    pair are set by the combination of its opening class and its beat."""
     pts = spring_points(.62, 120)
     rules = []
     for (a, b, total), cls in BLOOM_EASE.items():
         stops = ["0"] + (["0 %s%%" % a] if a != "0" else []) + pts[1:-1]
         stops += ["1 %s%%" % b, "1"] if b != "100" else ["1"]
-        rules.append(".%s{animation-duration:%ss;animation-timing-function:linear(%s)}" % (cls, total, ", ".join(stops)))
+        rules.append(".%s{animation-timing-function:linear(%s),linear}" % (cls, ", ".join(stops)))
+    for cls, total, beat in sorted(BEATS):
+        rules.append(".%s.b%d{animation-duration:%ss,%ss}" % (cls, beat, fmt(total, 2), fmt(FLUTTER_BEATS[beat], 2)))
     return "\n".join(rules)
-
-
-def leaf_polygon():
-    pts_l, pts_r = [], []
-    steps = 22
-    for k in range(steps + 1):
-        u = k / steps
-        h = 50 * (math.sin(math.pi * u ** 0.66) ** 0.92)
-        y = 100 - 100 * u
-        pts_l.append((50 - h, y))
-        pts_r.append((50 + h, y))
-    pts = pts_l + pts_r[::-1]
-    return "polygon(" + ", ".join(f"{x:.1f}% {y:.1f}%" for x, y in pts) + ")"
 
 
 def grain(seed, n, unit_x, unit_y, xmax, ymax):
@@ -697,9 +741,8 @@ def grain(seed, n, unit_x, unit_y, xmax, ymax):
     return ",\n    ".join(shadows)
 
 
-css = SRC
+css = open(SRC_CSS).read()
 css = css.replace("/*@SOFT@*/", spring(.78, 100))
-css = css.replace("/*@LEAF_POLY@*/", leaf_polygon())
 css = css.replace("/*@PETAL_KEYFRAMES@*/", "\n".join(KEYFRAMES))
 css = css.replace("/*@BLOOM_CLASSES@*/", bloom_classes())
 css = css.replace("/*@CLOCK@*/", "\n    " + clock())
@@ -718,5 +761,5 @@ os.makedirs(OUT_DIR, exist_ok=True)
 open(OUT_HTML, "w").write(html)
 open(OUT_CSS, "w").write(css)
 print("wrote", OUT_HTML, len(html), "bytes;", OUT_CSS, len(css), "bytes;",
-      "petals:", html.count('class="p r'), "elements:", html.count("<"),
+      "petals:", html.count('<i class="p '), "washes:", html.count("<b style=\"clip-path") - 3 * len(WAVES), "elements:", html.count("<"),
       "keyframes:", len(KEYFRAMES), "bloom easings:", len(BLOOM_EASE))
