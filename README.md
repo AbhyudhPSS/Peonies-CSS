@@ -7,12 +7,6 @@ every movement is a `@keyframes`.
 
 Open `index.html` in a browser. That's it — there is nothing to install or serve.
 
-The page waits for one tap and then plays a song alongside the bloom. That tap and the
-audio are the only script on the page (a browser will not play sound without them); the
-bouquet itself, and every movement in it, is CSS. The song is not part of this
-repository: put an audio file of your own beside `index.html` as `song.mp3` (see `SONG`
-and `SONG_FROM` in `src/build.py`), or it simply blooms in silence.
-
 ![the bouquet in full bloom](docs/preview.png)
 
 ## What it does

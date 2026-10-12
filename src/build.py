@@ -531,9 +531,7 @@ def splats():
 
 
 # ---------------------------------------------------------------- heading + credit
-TITLE = "I love you."
-SONG = "song.mp3"               # the music (kept beside index.html; not in the repository)
-SONG_FROM = 37                  # seconds into it at which it starts playing (0:37)
+TITLE = "Peonies for You."
 CREDIT_NAME = "Abhyudh"         # <- the name shown in the credit line at the bottom
 
 TITLE_STOPS = [(0.0, (122, 38, 80)), (0.5, (178, 63, 108)), (1.0, (201, 87, 127))]   # deep rose -> soft rose
@@ -573,7 +571,7 @@ def title_html():
         if ch == " ":
             letters.append('<span class="gap"></span>')
             continue
-        cls = ' class="cap"' if ch in "I" else ""
+        cls = ' class="cap"' if ch in "PY" else ""
         rise, rise_s, rise_t = held("letter-in", LETTER_IN, float("%.2f" % (.5 + idx * .075)), 1.5)
         letters.append(
             f'<span{cls} style="color:{title_color(idx / (len(glyphs) - 1))};'
@@ -644,15 +642,10 @@ html = f'''<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>I love you</title>
+  <title>Peonies for You</title>
   <link rel="stylesheet" href="peonies.css">
-  <script>document.documentElement.classList.add("waiting")</script>
 </head>
 <body>
-  <!-- The music. A browser will not play sound until the page has been touched, so the
-       bouquet waits for one tap, and the song and the bloom then start together. -->
-  <audio id="song" src="{SONG}" preload="auto"></audio>
-  <button class="begin" type="button" aria-label="Begin"><i class="heart" aria-hidden="true"></i><span>tap to begin</span></button>
   <!-- Pure HTML + CSS: no JavaScript, no images, no SVG. Everything you see is clip-paths, gradients, transforms and keyframes. -->
   <div class="paper"></div>
 
@@ -698,16 +691,6 @@ html = f'''<!DOCTYPE html>
   </div>
 
   <p class="credit" style="{CREDIT_IN}">Made with <i class="heart" aria-hidden="true"></i> by <b>{CREDIT_NAME}</b></p>
-  <script>
-    (function () {{
-      var song = document.getElementById("song"), begin = document.querySelector(".begin");
-      begin.addEventListener("click", function () {{
-        song.currentTime = {SONG_FROM};
-        song.play().catch(function () {{}});
-        document.documentElement.classList.remove("waiting");
-      }});
-    }})();
-  </script>
 </body>
 </html>
 '''

@@ -199,7 +199,7 @@ body {
   margin-top: -1.7em;          /* the top of the stage is empty paper: tuck it under the heading */
 }
 
-/* ---------- heading: "I love you."       -------------------------------------- */
+/* ---------- heading: "Peonies for You." -------------------------------------- */
 /* Each letter is its own span so it can bloom in on its own beat (opacity + transform
    only, with plain literal numbers), and carries its own shade of rose, so the
    gradient across the word needs no background-clip tricks. */
@@ -749,48 +749,3 @@ body {
   }
   .air, .veil { display: none; }
 }
-
-/* ---------- waiting for the first tap ----------------------------------------- */
-/* Until the page is tapped nothing is drawn but the paper and a heart to tap. The scene
-   is not rendered at all while it waits, so every animation in it, and the loop's clock
-   on <body>, starts from zero at the tap: in step with the song. */
-.begin { display: none; }
-.waiting body { animation: none; }
-.waiting .loop,
-.waiting .credit { display: none; }
-.waiting .begin {
-  position: fixed;
-  inset: 0;
-  z-index: 9;
-  display: grid;
-  place-content: center;
-  justify-items: center;
-  gap: 1.1em;
-  border: 0;
-  background: none;
-  cursor: pointer;
-  font-family: "Didot", "Bodoni 72", "Playfair Display", Georgia, serif;
-  font-style: italic;
-  font-size: clamp(1rem, 2.4vh, 1.4rem);
-  letter-spacing: .16em;
-  color: rgba(104, 48, 78, .8);
-}
-.begin .heart {
-  position: relative;
-  width: 1.6em;
-  height: 1.6em;
-  background: #d9507f;
-  rotate: -45deg;
-  animation: heartbeat 2.6s ease-in-out infinite;
-}
-.begin .heart::before,
-.begin .heart::after {
-  content: "";
-  position: absolute;
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  background: inherit;
-}
-.begin .heart::before { top: -50%; left: 0; }
-.begin .heart::after  { left: 50%; top: 0; }
